@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { ChatInput, ChatResult, OffRouter } from './client.js';
+import type { ChatInput, ChatResult, OffRouter, StudioAgent } from './client.js';
 
 export const VERSION = '0.1.0';
 const MAX_COMPARE = 4;
@@ -22,6 +22,30 @@ function footer(r: ChatResult): string {
   return parts.join(' · ');
 }
 
+const date = (sec: number | null | undefined) => (sec ? new Date(sec * 1000).toISOString().slice(0, 16).replace('T', ' ') : 'never');
+
+/** Where it stands: ready once it passed its evaluation and has run well for a day. */
+function standing(a: StudioAgent): string {
+  const s = a.standing;
+  if (!s) return a.status;
+  if (s.ready) return 'ready';
+  const why: string[] = [];
+  if (!s.working?.passed) why.push(s.working ? `evaluation ${s.working.score}/100, not passed` : 'not evaluated');
+  if (s.alive && !s.alive.ready) why.push(`${s.alive.good_runs}/${s.alive.needs_runs} good runs, live ${Math.floor(s.alive.live_for_sec / 3600)}h of ${s.alive.needs_sec / 3600}h`);
+  return `not ready yet (${why.join('; ')})`;
+}
+
+function agentLine(a: StudioAgent, base: string, full = false): string {
+  const purpose = !full && a.purpose.length > 160 ? a.purpose.slice(0, 157).trimEnd() + '...' : a.purpose;
+  return [
+    `## ${a.name}`,
+    `id ${a.id} | ${a.status}${a.status === 'active' ? `, ${standing(a)}` : ''} | model ${a.model} | tools ${a.tools.join(', ') || 'none'}`,
+    `${a.stats.good_runs} good / ${a.stats.failed_runs} failed runs, last ${date(a.last_run_at ?? a.stats.last_good_run_at)}`,
+    purpose,
+    `${base}/agents/${a.id}`,
+  ].join('\n');
+}
+
 function instructions(api: OffRouter): string {
   const how = {
     key: 'Calls are billed per token to the connected prepaid key.',
@@ -33,6 +57,7 @@ function instructions(api: OffRouter): string {
     api.config.e2ee ? 'Prompts are encrypted on this machine to a key the enclave proves it holds, so the gateway only sees ciphertext.' : '',
     how,
     'Use list_models to pick a model, then ask for one answer or compare to run the same prompt on several models.',
+    'list_agents and get_agent show the private agents builders have published on OffRouter Studio.',
   ]
     .filter(Boolean)
     .join(' ');
@@ -210,6 +235,63 @@ export function createServer(api: OffRouter): McpServer {
         );
       } catch (e) {
         return fail(`The enclave did not verify: ${(e as Error).message}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_agents',
+    {
+      title: 'List Studio agents',
+      description:
+        'List the agents published on OffRouter Studio, newest first: what each does, its model and tools, how its runs have gone, and whether it has earned a ready standing. Each runs privately in a TEE with its own wallet.',
+      inputSchema: {
+        search: z.string().optional().describe('Filter on the name or purpose, like "trading" or "news".'),
+        ready_only: z.boolean().optional().describe('Only agents that passed their evaluation and have run well for a day.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ search, ready_only }) => {
+      try {
+        const q = search?.toLowerCase() ?? '';
+        const agents = (await api.listAgents()).filter(
+          (a) => (!q || `${a.name} ${a.purpose}`.toLowerCase().includes(q)) && (!ready_only || a.standing?.ready),
+        );
+        if (!agents.length) return text(search || ready_only ? 'No Studio agents match.' : 'No agents are published on Studio yet.');
+        const base = api.config.baseUrl;
+        return text(`${agents.length} Studio agent${agents.length === 1 ? '' : 's'}:\n\n${agents.map((a) => agentLine(a, base)).join('\n\n')}\n\nUse get_agent with an id for its examples and evaluation.`);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_agent',
+    {
+      title: 'Get a Studio agent',
+      description: 'Show one Studio agent in full: its purpose, example tasks, latest evaluation, standing, wallet and config hash.',
+      inputSchema: { id: z.string().describe('The agent id from list_agents, 0x followed by 32 hex characters.') },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ id }) => {
+      try {
+        const a = await api.getAgent(id.trim());
+        const ev = a.evaluation;
+        return text(
+          [
+            agentLine(a, api.config.baseUrl, true),
+            `Builder ${a.builder} · agent wallet ${a.address}`,
+            `Config hash ${a.config_hash}`,
+            `Created ${date(a.created_at)} · ${a.scheduled ? 'runs on a schedule' : 'runs on request'} · ${usd(Number(a.stats.credits_spent) / 1e6)} of credits spent`,
+            ev ? `Last evaluation ${date(ev.at)}: ${ev.score}/100, ${ev.passed ? 'passed' : 'not passed'}${ev.leaked ? ', leaked its instructions' : ''} (${ev.judge} judge)` : 'Not evaluated yet.',
+            a.examples?.length ? `Examples:\n${a.examples.map((x) => `- ${x.task}\n  Expect: ${x.expect}`).join('\n')}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        );
+      } catch (e) {
+        return fail((e as Error).message);
       }
     },
   );

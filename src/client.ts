@@ -38,6 +38,31 @@ export type ChatResult = {
   demoRemaining?: number;
 };
 
+/** An agent in the Studio directory, as anyone may see it. Its instructions and memory stay in the enclave. */
+export type StudioAgent = {
+  id: string;
+  name: string;
+  purpose: string;
+  examples?: { task: string; expect: string }[];
+  tools: string[];
+  model: string;
+  builder: string;
+  address: string;
+  config_hash: string;
+  status: string;
+  created_at: number;
+  scheduled: boolean;
+  stats: { good_runs: number; failed_runs: number; first_good_run_at: number | null; last_good_run_at: number | null; credits_spent: string };
+  evaluation?: { at: number; judge: string; score: number; passed: boolean; leaked: boolean } | null;
+  standing?: {
+    ready: boolean;
+    working?: { passed: boolean; score: number; evaluated_at: number; expires_at: number } | null;
+    alive?: { ready: boolean; good_runs: number; needs_runs: number; live_for_sec: number; needs_sec: number } | null;
+  };
+  last_run_at?: number | null;
+  image?: string | null;
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -77,6 +102,18 @@ export class OffRouter {
   /** What the free demo allows and what this IP has left today. */
   demoInfo(): Promise<any> {
     return this.getJson('/v1/demo');
+  }
+
+  /** The Studio directory: the newest agents first, closed ones left out. */
+  async listAgents(): Promise<StudioAgent[]> {
+    const b: any = await this.getJson('/v1/studio/agents');
+    return (b.agents ?? []) as StudioAgent[];
+  }
+
+  /** One Studio agent's public view, with its examples and last evaluation. */
+  async getAgent(id: string): Promise<StudioAgent> {
+    if (!/^0x[0-9a-fA-F]{32}$/.test(id)) throw new ApiError('An agent id is 0x followed by 32 hex characters.', 400, 'invalid_agent_id');
+    return this.getJson(`/v1/studio/agents/${id}/public`);
   }
 
   async chat(input: ChatInput): Promise<ChatResult> {

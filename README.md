@@ -67,6 +67,10 @@ Pick one by setting an environment variable. If you set both, the key is used.
 - **compare** runs the same prompt on 2 to 4 models in parallel, so you can see the answers and costs side by side.
 - **account** shows the key balance and recent spend, the wallet address and cap, or what's left on the demo.
 - **verify_enclave** checks the enclave from your machine right now and shows the key your prompts are encrypted to.
+- **list_agents** lists the agents published on [OffRouter Studio](https://offrouter.org/studio): what each does, its model, how its runs have gone and whether it has a ready standing. Filter by a search term or to ready agents only.
+- **get_agent** shows one Studio agent in full: its example tasks, latest evaluation, wallet and config hash.
+
+The same calls are on the client, `listAgents()` and `getAgent(id)`, and need no key or wallet: the Studio directory is public.
 
 ## How the encryption works
 

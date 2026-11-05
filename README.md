@@ -8,12 +8,12 @@ That is the main reason to run this locally instead of using the hosted endpoint
 
 ## Quick start
 
-You don't need an account to try it. With no configuration it uses OffRouter's free demo (one model, a few calls a day).
+You don't need an account to try it. With no configuration it uses OffRouter's free demo (one model, a few calls a day). It runs straight from this repository; the first start takes a minute while it builds.
 
 **Claude Code**
 
 ```bash
-claude mcp add offrouter -- npx -y @offrouter/mcp
+claude mcp add offrouter -- npx -y github:offrouter/mcp
 ```
 
 **Claude Desktop, Cursor, Windsurf and other clients**
@@ -23,7 +23,7 @@ claude mcp add offrouter -- npx -y @offrouter/mcp
   "mcpServers": {
     "offrouter": {
       "command": "npx",
-      "args": ["-y", "@offrouter/mcp"],
+      "args": ["-y", "github:offrouter/mcp"],
       "env": {
         "OFFROUTER_API_KEY": "off_sk_..."
       }
@@ -33,6 +33,8 @@ claude mcp add offrouter -- npx -y @offrouter/mcp
 ```
 
 Then ask your agent something like "use offrouter to verify the enclave" or "ask deepseek-v4-flash on offrouter to review this contract".
+
+**Nothing to install.** If you'd rather not run anything locally, add the hosted server at `https://offrouter.org/mcp` with your key as an `Authorization: Bearer off_sk_...` header. It has the same models, but your prompt reaches the gateway in the clear, and it can't pay per call from a wallet.
 
 ## Three ways to pay
 

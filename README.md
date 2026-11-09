@@ -8,12 +8,12 @@ That is the main reason to run this locally instead of using the hosted endpoint
 
 ## Quick start
 
-You don't need an account to try it. With no configuration it uses OffRouter's free demo (one model, a few calls a day). It runs straight from this repository; the first start takes a minute while it builds.
+You don't need an account to try it. With no configuration it uses OffRouter's free demo (one model, a few calls a day).
 
 **Claude Code**
 
 ```bash
-claude mcp add offrouter -- npx -y github:offrouter/mcp
+claude mcp add offrouter -- npx -y @offrouter/mcp
 ```
 
 **Claude Desktop, Cursor, Windsurf and other clients**
@@ -23,7 +23,7 @@ claude mcp add offrouter -- npx -y github:offrouter/mcp
   "mcpServers": {
     "offrouter": {
       "command": "npx",
-      "args": ["-y", "github:offrouter/mcp"],
+      "args": ["-y", "@offrouter/mcp"],
       "env": {
         "OFFROUTER_API_KEY": "off_sk_..."
       }

@@ -8,6 +8,8 @@ import { makeWallet, settlement, type Wallet } from './pay.js';
 
 export type Model = {
   id: string;
+  /** "chat", or "image" for an image model (not served by chat, so left out of the list). */
+  type?: string;
   context_length: number;
   input_usdc_per_mtok: number;
   output_usdc_per_mtok: number;
@@ -87,7 +89,7 @@ export class OffRouter {
 
   async listModels(): Promise<Model[]> {
     if (!this.models || Date.now() - this.models.at > MODELS_TTL_MS) {
-      const list = this.getJson('/v1/models').then((b: any) => (b.data ?? []) as Model[]);
+      const list = this.getJson('/v1/models').then((b: any) => ((b.data ?? []) as Model[]).filter((m) => m.type !== 'image'));
       this.models = { at: Date.now(), list };
       list.catch(() => (this.models = null));
     }

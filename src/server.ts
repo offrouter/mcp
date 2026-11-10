@@ -1,11 +1,13 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { ChatInput, ChatResult, OffRouter, StudioAgent } from './client.js';
+import type { ChatInput, ChatResult, ImageResult, OffRouter, StudioAgent } from './client.js';
 
 export const VERSION = '0.1.0';
 const MAX_COMPARE = 4;
 
-type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
+type ToolResult = { content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[]; isError?: boolean };
 const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] });
 const fail = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }], isError: true });
 
@@ -21,6 +23,17 @@ function footer(r: ChatResult): string {
   if (r.receiptUrl) parts.push(`receipt ${r.receiptUrl}`);
   return parts.join(' · ');
 }
+
+function imageFooter(r: ImageResult): string {
+  const parts = [r.model, `${r.images.length} image${r.images.length === 1 ? '' : 's'}`];
+  if (r.chargeUsd != null) parts.push(usd(r.chargeUsd));
+  if (r.transaction && !r.transaction.startsWith('dryrun_')) parts.push(`paid in tx ${r.transaction}`);
+  parts.push('served in a TEE, prompt not end to end encrypted');
+  if (r.receiptUrl) parts.push(`receipt ${r.receiptUrl}`);
+  return parts.join(' · ');
+}
+
+const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 
 const date = (sec: number | null | undefined) => (sec ? new Date(sec * 1000).toISOString().slice(0, 16).replace('T', ' ') : 'never');
 
@@ -57,6 +70,7 @@ function instructions(api: OffRouter): string {
     api.config.e2ee ? 'Prompts are encrypted on this machine to a key the enclave proves it holds, so the gateway only sees ciphertext.' : '',
     how,
     'Use list_models to pick a model, then ask for one answer or compare to run the same prompt on several models.',
+    'generate_image makes images from a text prompt on a private image model.',
     'list_agents and get_agent show the private agents builders have published on OffRouter Studio.',
   ]
     .filter(Boolean)
@@ -92,7 +106,7 @@ export function createServer(api: OffRouter): McpServer {
       }
       const q = search?.toLowerCase() ?? '';
       const rows = models.filter((m) => !q || m.id.toLowerCase().includes(q));
-      if (!rows.length) return text(`No models match "${search}".`);
+      if (!rows.length && !(await api.listImageModels().catch(() => [])).some((m) => m.id.toLowerCase().includes(q))) return text(`No models match "${search}".`);
       const lines = rows.map(
         (m) =>
           `${m.id} | ${Math.round(m.context_length / 1000)}k ctx | ${usd(m.input_usdc_per_mtok)} in / ${usd(m.output_usdc_per_mtok)} out per M tokens` +
@@ -100,7 +114,12 @@ export function createServer(api: OffRouter): McpServer {
           (m.discount_pct ? ` | ${m.discount_pct}% off` : '') +
           (api.config.e2ee && !m.e2ee?.model ? ' | no e2ee' : ''),
       );
-      return text(`${rows.length} private models, all served in a GPU TEE:\n\n${lines.join('\n')}`);
+      const images = (await api.listImageModels().catch(() => [])).filter((m) => !q || m.id.toLowerCase().includes(q));
+      const imageLines = images.map((m) => `${m.id} | up to ${m.max_images} per call | ${usd(m.usdc_per_image)} per image`);
+      return text(
+        `${rows.length} private models, all served in a GPU TEE:\n\n${lines.join('\n')}` +
+          (imageLines.length ? `\n\nImage models, for generate_image:\n\n${imageLines.join('\n')}` : ''),
+      );
     },
   );
 
@@ -153,6 +172,55 @@ export function createServer(api: OffRouter): McpServer {
         r.status === 'fulfilled' ? `## ${ids[i]}\n\n${r.value.text || '(no text)'}\n\n${footer(r.value)}` : `## ${ids[i]}\n\nError: ${(r.reason as Error).message}`,
       );
       return { content: [{ type: 'text', text: sections.join('\n\n---\n\n') }], isError: results.every((r) => r.status === 'rejected') };
+    },
+  );
+
+  server.registerTool(
+    'generate_image',
+    {
+      title: 'Generate an image',
+      description:
+        'Generate images from a text prompt on a private OffRouter image model. It runs inside a GPU TEE and nothing is stored. Priced per image (see list_models). ' +
+        'The images come back inline and are saved as files, whose paths are returned. Image models do not take end to end encryption yet, so the prompt reaches the gateway in the clear.',
+      inputSchema: {
+        prompt: z.string().min(1).max(4000).describe('What to draw.'),
+        model: z.string().optional().describe('Image model id from list_models, like "flux-2-klein". Defaults to the first one.'),
+        n: z.number().int().min(1).max(4).optional().describe('How many images, 1 by default.'),
+        size: z
+          .string()
+          .regex(/^\d{3,4}x\d{3,4}$/)
+          .optional()
+          .describe('WIDTHxHEIGHT, each side a multiple of 16 from 256 to 2048. Defaults to 1024x1024.'),
+        save_dir: z.string().optional().describe('Folder to save the images in. Defaults to OFFROUTER_IMAGE_DIR, or a temp folder.'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async ({ save_dir, ...args }) => {
+      try {
+        const r = await api.generateImage(args);
+        if (!r.images.length) return fail(`${r.model} returned no image, so nothing was charged.`);
+        const dir = resolve(save_dir ?? api.config.imageDir);
+        await mkdir(dir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const paths: string[] = [];
+        for (const [i, img] of r.images.entries()) {
+          const file = join(dir, `${r.model}-${stamp}${r.images.length > 1 ? `-${i + 1}` : ''}.${EXT[img.mimeType] ?? 'png'}`);
+          await writeFile(file, Buffer.from(img.data, 'base64'));
+          paths.push(file);
+        }
+        const revised = r.images.map((img) => img.revisedPrompt).filter(Boolean);
+        return {
+          content: [
+            ...r.images.map((img) => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })),
+            {
+              type: 'text' as const,
+              text: [`Saved to:\n${paths.join('\n')}`, revised.length ? `Revised prompt: ${revised[0]}` : '', imageFooter(r)].filter(Boolean).join('\n\n'),
+            },
+          ],
+        };
+      } catch (e) {
+        return fail((e as Error).message);
+      }
     },
   );
 

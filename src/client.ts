@@ -27,6 +27,19 @@ export type ChatInput = {
   temperature?: number;
 };
 
+export type ImageModel = { id: string; type: 'image'; max_images: number; usdc_per_image: number; discount_pct?: number };
+
+export type ImageInput = { model?: string; prompt: string; n?: number; size?: string };
+
+export type ImageResult = {
+  model: string;
+  images: { data: string; mimeType: string; revisedPrompt?: string }[];
+  chargeUsd: number | null;
+  receiptUrl: string | null;
+  paidWith: 'key' | 'wallet';
+  transaction?: string;
+};
+
 export type ChatResult = {
   model: string;
   text: string;
@@ -80,20 +93,61 @@ const MODELS_TTL_MS = 5 * 60_000;
 export class OffRouter {
   readonly enclave: EnclaveCache;
   readonly wallet: Wallet | null;
-  private models: { at: number; list: Promise<Model[]> } | null = null;
+  private catalog: { at: number; list: Promise<any[]> } | null = null;
 
   constructor(readonly config: Config) {
     this.enclave = new EnclaveCache(config.baseUrl);
     this.wallet = config.mode === 'wallet' ? makeWallet(config) : null;
   }
 
-  async listModels(): Promise<Model[]> {
-    if (!this.models || Date.now() - this.models.at > MODELS_TTL_MS) {
-      const list = this.getJson('/v1/models').then((b: any) => ((b.data ?? []) as Model[]).filter((m) => m.type !== 'image'));
-      this.models = { at: Date.now(), list };
-      list.catch(() => (this.models = null));
+  private all(): Promise<any[]> {
+    if (!this.catalog || Date.now() - this.catalog.at > MODELS_TTL_MS) {
+      const list = this.getJson('/v1/models').then((b: any) => (b.data ?? []) as any[]);
+      this.catalog = { at: Date.now(), list };
+      list.catch(() => (this.catalog = null));
     }
-    return this.models.list;
+    return this.catalog.list;
+  }
+
+  /** The chat models. Image models are served by generateImage, so they are left out. */
+  async listModels(): Promise<Model[]> {
+    return ((await this.all()) as Model[]).filter((m) => m.type !== 'image');
+  }
+
+  async listImageModels(): Promise<ImageModel[]> {
+    return ((await this.all()) as ImageModel[]).filter((m) => m.type === 'image');
+  }
+
+  /**
+   * Generate images. Image models do not take end to end encryption yet, so the prompt reaches
+   * the gateway in the clear; it is still served inside the TEE and nothing is stored.
+   */
+  async generateImage(input: ImageInput): Promise<ImageResult> {
+    const { mode } = this.config;
+    if (mode === 'demo') throw new ApiError('Image generation needs a key or a wallet: the free demo only serves one chat model. Set OFFROUTER_API_KEY or OFFROUTER_WALLET_KEY.', 402);
+    const models = await this.listImageModels();
+    const model = input.model ?? models[0]?.id;
+    if (!model) throw new ApiError('OffRouter has no image model right now.', 404, 'model_not_found');
+    const entry = models.find((m) => m.id === model);
+    if (!entry) throw new ApiError(`There is no image model called "${model}". Image models: ${models.map((m) => m.id).join(', ') || 'none'}.`, 404, 'model_not_found');
+
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (mode === 'key') headers.authorization = `Bearer ${this.config.apiKey}`;
+    const body = { model, prompt: input.prompt, n: input.n ?? 1, size: input.size ?? '1024x1024', response_format: 'b64_json' };
+    const res = await this.post('/v1/images/generations', headers, body);
+    const out: any = await res.json();
+    const images = (out.data ?? [])
+      .filter((d: any) => typeof d?.b64_json === 'string' && d.b64_json)
+      .map((d: any) => ({ data: d.b64_json as string, mimeType: mimeOf(d.b64_json), ...(d.revised_prompt ? { revisedPrompt: String(d.revised_prompt) } : {}) }));
+    const charge = res.headers.get('x-offrouter-charge-usd');
+    return {
+      model,
+      images,
+      chargeUsd: charge == null ? null : Number(charge),
+      receiptUrl: res.headers.get('x-offrouter-receipt-url'),
+      paidWith: mode,
+      transaction: mode === 'wallet' ? settlement(res.headers)?.transaction : undefined,
+    };
   }
 
   /** Balance and recent usage of the prepaid key. */
@@ -167,26 +221,7 @@ export class OffRouter {
     }
 
     const path = mode === 'demo' ? '/v1/demo/chat' : '/v1/chat/completions';
-    const doFetch = mode === 'wallet' ? this.wallet!.fetch : fetch;
-    let res: Response;
-    try {
-      res = await doFetch(`${this.config.baseUrl}${path}`, { method: 'POST', headers, body: JSON.stringify(payload) });
-    } catch (e) {
-      const msg = (e as Error).message || String(e);
-      if (mode === 'wallet' && /spendControls|maxAmountPerPayment/.test(msg)) {
-        throw new Error(`Not paid: this call is quoted above the $${this.config.maxUsd} cap per call. Lower max_tokens or raise OFFROUTER_MAX_USD.`);
-      }
-      if (mode === 'wallet') throw new Error(`Payment failed: ${msg.replace(/\.+$/, '')}.`);
-      throw e;
-    }
-    if (!res.ok) {
-      const err = await apiError(res);
-      if (mode === 'wallet' && res.status === 402) {
-        const why = /insufficient_balance/.test(err.message) ? 'it does not hold enough' : err.message.replace(/\.+$/, '');
-        throw new ApiError(`The wallet ${this.wallet!.address} could not pay: ${why}. Fund it with USDC on Base or USDG on Robinhood Chain.`, 402, err.code);
-      }
-      throw err;
-    }
+    const res = await this.post(path, headers, payload);
     if (session && !session.applied(res.headers)) throw new Error('The enclave did not confirm it encrypted the answer, so it was not read.');
 
     let text = '';
@@ -222,11 +257,45 @@ export class OffRouter {
     };
   }
 
+  /** POST, paid from the wallet in wallet mode, with payment failures turned into readable errors. */
+  private async post(path: string, headers: Record<string, string>, payload: unknown): Promise<Response> {
+    const { mode } = this.config;
+    const doFetch = mode === 'wallet' ? this.wallet!.fetch : fetch;
+    let res: Response;
+    try {
+      res = await doFetch(`${this.config.baseUrl}${path}`, { method: 'POST', headers, body: JSON.stringify(payload) });
+    } catch (e) {
+      const msg = (e as Error).message || String(e);
+      if (mode === 'wallet' && /spendControls|maxAmountPerPayment/.test(msg)) {
+        throw new Error(`Not paid: this call is quoted above the $${this.config.maxUsd} cap per call. Lower max_tokens (or n, for images) or raise OFFROUTER_MAX_USD.`);
+      }
+      if (mode === 'wallet') throw new Error(`Payment failed: ${msg.replace(/\.+$/, '')}.`);
+      throw e;
+    }
+    if (!res.ok) {
+      const err = await apiError(res);
+      if (mode === 'wallet' && res.status === 402) {
+        const why = /insufficient_balance/.test(err.message) ? 'it does not hold enough' : err.message.replace(/\.+$/, '');
+        throw new ApiError(`The wallet ${this.wallet!.address} could not pay: ${why}. Fund it with USDC on Base or USDG on Robinhood Chain.`, 402, err.code);
+      }
+      throw err;
+    }
+    return res;
+  }
+
   private async getJson(path: string, headers: Record<string, string> = {}): Promise<any> {
     const res = await fetch(`${this.config.baseUrl}${path}`, { headers: { accept: 'application/json', ...headers } });
     if (!res.ok) throw await apiError(res);
     return res.json();
   }
+}
+
+/** PNG, JPEG or WebP, from the first bytes. */
+function mimeOf(b64: string): string {
+  if (b64.startsWith('iVBOR')) return 'image/png';
+  if (b64.startsWith('/9j/')) return 'image/jpeg';
+  if (b64.startsWith('UklGR')) return 'image/webp';
+  return 'image/png';
 }
 
 async function apiError(res: Response): Promise<ApiError> {

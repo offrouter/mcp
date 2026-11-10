@@ -60,12 +60,14 @@ Pick one by setting an environment variable. If you set both, the key is used.
 | `OFFROUTER_NETWORK` | both | Only pay on `base` or only on `robinhood` |
 | `OFFROUTER_MAX_TOKENS` | `2048` | Output budget when the agent doesn't set one |
 | `OFFROUTER_E2EE` | `on` | Set to `off` to send prompts to the gateway in the clear |
+| `OFFROUTER_IMAGE_DIR` | a temp folder | Where `generate_image` saves its images |
 | `OFFROUTER_BASE_URL` | `https://offrouter.org` | API to talk to |
 
 ## Tools
 
-- **list_models** lists the models with context length and price per million tokens.
+- **list_models** lists the models with context length and price per million tokens, and the image models with their price per image.
 - **ask** sends a prompt to one model and returns the answer, what it cost, and a link to its signed receipt.
+- **generate_image** makes 1 to 4 images from a text prompt on a private image model (like `flux-2-klein`), priced per image. The images come back inline and are saved as files. Image models don't take end to end encryption yet, so the prompt reaches the gateway in the clear; it's still served in the TEE and nothing is stored. Needs a key or a wallet.
 - **compare** runs the same prompt on 2 to 4 models in parallel, so you can see the answers and costs side by side.
 - **account** shows the key balance and recent spend, the wallet address and cap, or what's left on the demo.
 - **verify_enclave** checks the enclave from your machine right now and shows the key your prompts are encrypted to.

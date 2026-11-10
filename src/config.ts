@@ -1,5 +1,7 @@
 // Everything is configured through environment variables, so it fits in the
 // "env" block of any MCP client config.
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export type Mode = 'key' | 'wallet' | 'demo';
 
@@ -15,6 +17,8 @@ export type Config = {
   /** Output budget when the caller doesn't give one. */
   defaultMaxTokens: number;
   e2ee: boolean;
+  /** Where generated images are saved. */
+  imageDir: string;
 };
 
 const off = (v: string | undefined) => !!v && ['0', 'false', 'off', 'no'].includes(v.trim().toLowerCase());
@@ -46,5 +50,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     network: network as Config['network'],
     defaultMaxTokens,
     e2ee: !off(env.OFFROUTER_E2EE),
+    imageDir: env.OFFROUTER_IMAGE_DIR?.trim() || join(tmpdir(), 'offrouter-images'),
   };
 }

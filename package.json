@@ -1,6 +1,6 @@
 {
   "name": "@offrouter/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for OffRouter private inference. Every model runs in a GPU TEE, and your prompts are encrypted to the enclave before they leave your machine.",
   "license": "MIT",
   "author": "OffRouter",

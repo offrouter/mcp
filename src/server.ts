@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { ChatInput, ChatResult, ImageResult, OffRouter, StudioAgent } from './client.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 const MAX_COMPARE = 4;
 
 type ToolResult = { content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[]; isError?: boolean };

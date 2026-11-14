@@ -199,6 +199,52 @@ export class OffRouter {
     }
   }
 
+  /**
+   * Send an OpenAI chat request as it is (tools, streaming and all), encrypted to the enclave when
+   * encryption is on, and hand back the raw response with the session that opens it. Used by the
+   * private mode proxy. `apiKey` overrides the configured way to pay for this one call.
+   */
+  async openChat(body: any, apiKey?: string): Promise<{ res: Response; session: Session | null }> {
+    try {
+      return await this.openChatOnce(body, apiKey);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'e2ee_rejected' && this.config.e2ee) {
+        await this.enclave.refresh();
+        return this.openChatOnce(body, apiKey);
+      }
+      throw e;
+    }
+  }
+
+  private async openChatOnce(body: any, apiKey?: string): Promise<{ res: Response; session: Session | null }> {
+    const key = apiKey ?? (this.config.mode === 'key' ? this.config.apiKey : undefined);
+    if (!key && this.config.mode !== 'wallet') {
+      throw new ApiError('Private mode needs a prepaid key or a wallet: the free demo cannot run a coding agent. Run `npx @offrouter/mcp init`, or set OFFROUTER_API_KEY.', 401, 'no_key');
+    }
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (key) headers.authorization = `Bearer ${key}`;
+
+    let session: Session | null = null;
+    let payload = body;
+    if (this.config.e2ee) {
+      const model = String(body?.model ?? '');
+      const entry = (await this.listModels()).find((m) => m.id === model);
+      if (!entry) throw new ApiError(`There is no model called "${model}" on OffRouter.`, 404, 'model_not_found');
+      if (!entry.e2ee?.model) throw new ApiError(`${model} does not support end to end encryption, so private mode will not send it. Pick a model from GET /v1/models on this proxy.`, 400, 'e2ee_unsupported');
+      const enclave = await this.enclave.get();
+      session = await encryptRequest(body, { key: enclave.key, model: entry.e2ee.model });
+      assertSealed(body, session.body);
+      payload = session.body;
+      Object.assign(headers, session.headers);
+    }
+    const res = await this.post('/v1/chat/completions', headers, payload, !!key);
+    if (session && !session.applied(res.headers)) {
+      await res.body?.cancel().catch(() => {});
+      throw new ApiError('The enclave did not confirm it encrypted the answer, so it was not read.', 502, 'e2ee_not_applied');
+    }
+    return { res, session };
+  }
+
   private async send(model: string, body: Record<string, unknown>): Promise<ChatResult> {
     const { mode } = this.config;
     const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -258,8 +304,8 @@ export class OffRouter {
   }
 
   /** POST, paid from the wallet in wallet mode, with payment failures turned into readable errors. */
-  private async post(path: string, headers: Record<string, string>, payload: unknown): Promise<Response> {
-    const { mode } = this.config;
+  private async post(path: string, headers: Record<string, string>, payload: unknown, keyed = false): Promise<Response> {
+    const mode = keyed ? 'key' : this.config.mode;
     const doFetch = mode === 'wallet' ? this.wallet!.fetch : fetch;
     let res: Response;
     try {
@@ -287,6 +333,19 @@ export class OffRouter {
     const res = await fetch(`${this.config.baseUrl}${path}`, { headers: { accept: 'application/json', ...headers } });
     if (!res.ok) throw await apiError(res);
     return res.json();
+  }
+}
+
+/**
+ * Belt and braces for a whole conversation: refuse to send a request whose wire form still has any
+ * message's text in it. Tool call arguments are not covered, since E2EE v2 leaves them in the clear.
+ */
+export function assertSealed(plain: any, sealed: any): void {
+  const wire = JSON.stringify(sealed);
+  for (const m of plain?.messages ?? []) {
+    if (m?.content == null) continue;
+    const parts: string[] = typeof m.content === 'string' ? [m.content] : Array.isArray(m.content) ? m.content.map((p: any) => (typeof p?.text === 'string' ? p.text : '')) : [];
+    for (const p of parts) if (p.length >= 8 && wire.includes(JSON.stringify(p).slice(1, -1))) throw new Error('Encryption did not apply, so the request was not sent.');
   }
 }
 

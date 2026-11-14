@@ -36,6 +36,32 @@ Then ask your agent something like "use offrouter to verify the enclave" or "ask
 
 **Nothing to install.** If you'd rather not run anything locally, add the hosted server at `https://offrouter.org/mcp` with your key as an `Authorization: Bearer off_sk_...` header. It has the same models, but your prompt reaches the gateway in the clear, and it can't pay per call from a wallet.
 
+## Private mode for coding agents
+
+Private mode runs your coding agent's own model calls through OffRouter. A small proxy on your machine speaks the OpenAI API. Before any request leaves your machine, it encrypts every message in the conversation to the enclave: your prompts, the system prompt, and the files the agent reads. The gateway in between only ever sees ciphertext.
+
+```bash
+npx -y @offrouter/mcp init     # check your key, pick a model, set up your agents
+npx -y @offrouter/mcp proxy    # run it while you code
+```
+
+`init` saves your key to `~/.offrouter/config.json`, which only you can read, so it isn't copied into every agent's config. Agents point at `http://127.0.0.1:7402/v1` with the placeholder key `offrouter-private-mode`.
+
+| Agent | Setup |
+| --- | --- |
+| OpenCode | `init` adds an "OffRouter (private mode)" provider to `~/.config/opencode/opencode.json` and keeps a backup |
+| Codex CLI, Continue, Cline, Roo Code, Kilo Code, Aider | `init` prints the exact settings to paste |
+| Any OpenAI-compatible tool | Set the base URL to `http://127.0.0.1:7402/v1` |
+| Cursor, Claude Code | Not supported. Cursor sends model calls through its own servers, and Claude Code speaks Anthropic's API. Add the MCP server instead (see the quick start above) |
+
+`GET /v1/models` on the proxy lists only models that support end to end encryption. A request for any other model is refused rather than sent in the clear. Every response carries `x-offrouter-private-mode: e2ee`, along with the charge and receipt headers.
+
+**What private mode encrypts:** the content of every message, including tool results, so files your agent opens and command output it reads are sealed.
+
+**What it doesn't encrypt:** tool definitions, the arguments of tool calls (so code the model writes through an edit tool), the model name and settings. The enclave protocol (E2EE v2) leaves these in the clear. They reach the gateway readable and are still served in the TEE with nothing stored. As with the MCP server, the gateway also sees sizes, timing, your IP and who paid.
+
+The proxy only answers clients on this machine. It listens on 127.0.0.1, rejects any other `Host`, and only accepts JSON. Any local program can still spend through it while it runs, so stop it when you're done. Private mode needs a prepaid key or `OFFROUTER_WALLET_KEY`; the free demo can't run a coding agent. When paying from a wallet, long coding contexts can exceed the default $0.10 cap per call, so raise `OFFROUTER_MAX_USD`.
+
 ## Three ways to pay
 
 Pick one by setting an environment variable. If you set both, the key is used.

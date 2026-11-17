@@ -3,8 +3,9 @@
 // messages to the enclave before anything goes over the network.
 import { EnclaveCache } from './attest.js';
 import type { Config } from './config.js';
-import { encryptRequest, type Session } from './e2ee.js';
+import { encryptRequest, encryptWebRequest, type Session } from './e2ee.js';
 import { makeWallet, settlement, type Wallet } from './pay.js';
+import { receiptSigned, WebEnclaveCache } from './web.js';
 
 export type Model = {
   id: string;
@@ -78,6 +79,36 @@ export type StudioAgent = {
   image?: string | null;
 };
 
+export type WebSearchInput = { query: string; count?: number; country?: string; language?: string; freshness?: 'pd' | 'pw' | 'pm' | 'py' };
+export type WebFetchInput = { url: string; max_chars?: number; links?: boolean };
+
+/** What every private web answer carries besides its content. */
+export type WebMeta = {
+  chargeUsd: number | null;
+  encrypted: boolean;
+  /** The enclave's signer signed the receipt of what left it. */
+  receiptVerified: boolean;
+  paidWith: 'key' | 'wallet';
+  transaction?: string;
+};
+
+export type WebSearchResult = WebMeta & {
+  querySent: string;
+  redacted: Record<string, number>;
+  results: { title: string; url: string; snippet: string; age?: string; extra_snippets?: string[] }[];
+};
+
+export type WebPage = WebMeta & {
+  url: string;
+  finalUrl: string;
+  status: number;
+  contentType: string;
+  title: string | null;
+  text: string;
+  truncated: boolean;
+  links?: { text: string; url: string }[];
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -92,11 +123,13 @@ const MODELS_TTL_MS = 5 * 60_000;
 
 export class OffRouter {
   readonly enclave: EnclaveCache;
+  readonly web: WebEnclaveCache;
   readonly wallet: Wallet | null;
   private catalog: { at: number; list: Promise<any[]> } | null = null;
 
   constructor(readonly config: Config) {
     this.enclave = new EnclaveCache(config.baseUrl);
+    this.web = new WebEnclaveCache(config.baseUrl);
     this.wallet = config.mode === 'wallet' ? makeWallet(config) : null;
   }
 
@@ -304,6 +337,54 @@ export class OffRouter {
   }
 
   /** POST, paid from the wallet in wallet mode, with payment failures turned into readable errors. */
+  /** Search the web from the enclave. Encrypted end to end unless OFFROUTER_E2EE is off. */
+  async webSearch(input: WebSearchInput): Promise<WebSearchResult> {
+    const { body, meta } = await this.webCall('web-search', input);
+    return { ...meta, querySent: body.query_sent, redacted: body.redacted ?? {}, results: body.results ?? [] };
+  }
+
+  /** Read a page from the enclave. Encrypted end to end unless OFFROUTER_E2EE is off. */
+  async webFetch(input: WebFetchInput): Promise<WebPage> {
+    const { body, meta } = await this.webCall('web-fetch', input);
+    return { ...meta, url: body.url, finalUrl: body.final_url, status: body.status, contentType: body.content_type, title: body.title ?? null, text: body.text ?? '', truncated: !!body.truncated, links: body.links };
+  }
+
+  private async webCall(model: 'web-search' | 'web-fetch', request: object, retried = false): Promise<{ body: any; meta: WebMeta }> {
+    const { mode } = this.config;
+    if (mode === 'demo') throw new ApiError('Private web search needs a key or a wallet: the free demo only serves chat. Set OFFROUTER_API_KEY or OFFROUTER_WALLET_KEY.', 402);
+    const enclave = await this.web.get();
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (mode === 'key') headers.authorization = `Bearer ${this.config.apiKey}`;
+    const path = model === 'web-search' ? '/v1/web/search' : '/v1/web/fetch';
+    const session = this.config.e2ee ? await encryptWebRequest(request, { publicKey: enclave.publicKey, model }) : null;
+    let res: Response;
+    try {
+      res = await this.post(path, { ...headers, ...(session?.headers ?? {}) }, session ? session.body : request);
+    } catch (e) {
+      // The enclave restarted with a new key: check it again, once, and encrypt to that.
+      if (!retried && e instanceof ApiError && e.code === 'e2ee_stale_key') {
+        await this.web.refresh();
+        return this.webCall(model, request, true);
+      }
+      throw e;
+    }
+    if (session && res.headers.get('x-e2ee-applied') !== 'true') throw new Error('The answer was not encrypted to this request, so it was not read.');
+    const raw: any = await res.json();
+    const body = session ? await session.open(raw) : raw;
+    if (body?.error) throw new ApiError(body.error.message || 'The request was refused.', body.error.status ?? 400, body.error.code);
+    const charge = res.headers.get('x-offrouter-charge-usd');
+    return {
+      body,
+      meta: {
+        chargeUsd: charge == null ? null : Number(charge),
+        encrypted: !!session,
+        receiptVerified: await receiptSigned(enclave.gateway, body.receipt, body.signature),
+        paidWith: mode,
+        transaction: mode === 'wallet' ? settlement(res.headers)?.transaction : undefined,
+      },
+    };
+  }
+
   private async post(path: string, headers: Record<string, string>, payload: unknown, keyed = false): Promise<Response> {
     const mode = keyed ? 'key' : this.config.mode;
     const doFetch = mode === 'wallet' ? this.wallet!.fetch : fetch;

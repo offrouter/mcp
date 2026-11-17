@@ -32,7 +32,7 @@ claude mcp add offrouter -- npx -y @offrouter/mcp
 }
 ```
 
-Then ask your agent something like "use offrouter to verify the enclave" or "ask deepseek-v4-flash on offrouter to review this contract".
+Then ask your agent something like "use offrouter to verify the enclave" or "ask deepseek-v4.1-flash on offrouter to review this contract".
 
 **Nothing to install.** If you'd rather not run anything locally, add the hosted server at `https://offrouter.org/mcp` with your key as an `Authorization: Bearer off_sk_...` header. It has the same models, but your prompt reaches the gateway in the clear, and it can't pay per call from a wallet.
 
@@ -94,6 +94,8 @@ Pick one by setting an environment variable. If you set both, the key is used.
 - **list_models** lists the models with context length and price per million tokens, and the image models with their price per image.
 - **ask** sends a prompt to one model and returns the answer, what it cost, and a link to its signed receipt.
 - **generate_image** makes 1 to 4 images from a text prompt on a private image model (like `flux-2-klein`), priced per image. The images come back inline and are saved as files. Image models don't take end to end encryption yet, so the prompt reaches the gateway in the clear; it's still served in the TEE and nothing is stored. Needs a key or a wallet.
+- **web_search** searches the web from inside an OffRouter enclave, so the search engine sees the enclave and never your machine, IP or account. Emails, keys, card numbers and the like are taken out of the query before it leaves. The query and the results are encrypted end to end to a key the enclave's Intel TDX quote vouches for, checked on your machine first. $0.008 a search. Needs a key or a wallet.
+- **web_fetch** reads a page as clean text the same way: the site sees the enclave, with no cookies or referrer, and the URL and page are encrypted end to end. $0.002 a page. Needs a key or a wallet.
 - **compare** runs the same prompt on 2 to 4 models in parallel, so you can see the answers and costs side by side.
 - **account** shows the key balance and recent spend, the wallet address and cap, or what's left on the demo.
 - **verify_enclave** checks the enclave from your machine right now and shows the key your prompts are encrypted to.

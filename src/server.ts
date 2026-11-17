@@ -2,9 +2,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { ChatInput, ChatResult, ImageResult, OffRouter, StudioAgent } from './client.js';
+import type { ChatInput, ChatResult, ImageResult, OffRouter, StudioAgent, WebMeta } from './client.js';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 const MAX_COMPARE = 4;
 
 type ToolResult = { content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[]; isError?: boolean };
@@ -30,6 +30,15 @@ function imageFooter(r: ImageResult): string {
   if (r.transaction && !r.transaction.startsWith('dryrun_')) parts.push(`paid in tx ${r.transaction}`);
   parts.push('served in a TEE, prompt not end to end encrypted');
   if (r.receiptUrl) parts.push(`receipt ${r.receiptUrl}`);
+  return parts.join(' · ');
+}
+
+function webFooter(r: WebMeta, extra: string[] = []): string {
+  const parts = ['run from the enclave', ...extra];
+  if (r.chargeUsd != null) parts.push(usd(r.chargeUsd));
+  if (r.transaction && !r.transaction.startsWith('dryrun_')) parts.push(`paid in tx ${r.transaction}`);
+  parts.push(r.encrypted ? 'encrypted end to end' : 'not encrypted');
+  parts.push(r.receiptVerified ? 'receipt signed by the enclave' : 'receipt not verified');
   return parts.join(' · ');
 }
 
@@ -72,6 +81,7 @@ function instructions(api: OffRouter): string {
     'Use list_models to pick a model, then ask for one answer or compare to run the same prompt on several models.',
     'generate_image makes images from a text prompt on a private image model.',
     'list_agents and get_agent show the private agents builders have published on OffRouter Studio.',
+    'web_search and web_fetch search the web and read pages from inside an enclave: the search engine and the site never see this machine, and the request is encrypted end to end. Prefer them over other web tools when the query or the page could say something about the user.',
   ]
     .filter(Boolean)
     .join(' ');
@@ -218,6 +228,74 @@ export function createServer(api: OffRouter): McpServer {
             },
           ],
         };
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'web_search',
+    {
+      title: 'Private web search',
+      description:
+        'Search the web privately. The search runs from inside an OffRouter enclave, so the search engine sees the query coming from the enclave, never this machine, its IP or an account. ' +
+        'Emails, API keys, card numbers and similar are taken out of the query before it leaves. The request and results are encrypted end to end. Costs one flat price per search.',
+      inputSchema: {
+        query: z.string().min(1).max(400).describe('What to search for.'),
+        count: z.number().int().min(1).max(20).optional().describe('How many results. Default 10.'),
+        freshness: z.enum(['pd', 'pw', 'pm', 'py']).optional().describe('Only results from the past day, week, month or year.'),
+        country: z.string().length(2).optional().describe('Two-letter country code to search from, such as US.'),
+        language: z.string().optional().describe('Language code of the results, such as en.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (input) => {
+      try {
+        const r = await api.webSearch(input);
+        const removed = Object.entries(r.redacted).map(([k, n]) => `${n} ${k.replace('_', ' ')}${n === 1 ? '' : 's'}`);
+        const lines = r.results.map((x, i) => [`${i + 1}. ${x.title || x.url}`, `   ${x.url}${x.age ? ` (${x.age})` : ''}`, x.snippet ? `   ${x.snippet}` : '', ...(x.extra_snippets ?? []).slice(0, 2).map((e) => `   ${e}`)].filter(Boolean).join('\n'));
+        return text(
+          [
+            r.results.length ? lines.join('\n\n') : 'No results.',
+            removed.length ? `Taken out of the query before it left: ${removed.join(', ')}. Searched for: "${r.querySent}".` : '',
+            webFooter(r, [`${r.results.length} result${r.results.length === 1 ? '' : 's'}`]),
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+        );
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'web_fetch',
+    {
+      title: 'Private page fetch',
+      description:
+        'Read a web page privately, as clean text. The page is fetched from inside an OffRouter enclave, so the site sees the enclave, never this machine; no cookies or referrer are sent. ' +
+        'The URL and the page are encrypted end to end. Works on HTML, text, JSON and XML. Costs one flat price per page.',
+      inputSchema: {
+        url: z.string().url().describe('The http or https page to read.'),
+        max_chars: z.number().int().min(100).max(100000).optional().describe('Most characters of text to return. Default 20000.'),
+        links: z.boolean().optional().describe('Also list the links on the page.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (input) => {
+      try {
+        const p = await api.webFetch(input);
+        const links = p.links?.length ? `\n\nLinks:\n${p.links.slice(0, 50).map((l) => `- ${l.text || l.url}: ${l.url}`).join('\n')}` : '';
+        return text(
+          [
+            `# ${p.title || p.finalUrl}`,
+            `${p.finalUrl}${p.finalUrl !== p.url ? ` (from ${p.url})` : ''} · ${p.status} · ${p.contentType}`,
+            p.text + (p.truncated ? '\n\n[cut off: raise max_chars for more]' : '') + links,
+            webFooter(p),
+          ].join('\n\n'),
+        );
       } catch (e) {
         return fail((e as Error).message);
       }

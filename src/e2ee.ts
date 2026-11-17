@@ -204,6 +204,41 @@ export async function encryptRequest(body: any, opts: { key: ServiceKey; model: 
   };
 }
 
+export type WebSession = {
+  body: { request: string };
+  headers: Record<string, string>;
+  /** The answer, opened. Throws E2eeError if it was not sealed by the enclave for this request. */
+  open<T = any>(answer: { id: string; response: string }): Promise<T>;
+};
+
+/**
+ * Encrypt a private web search or fetch to the gateway enclave's web key (GET /v1/web, checked by web.ts).
+ * The whole request is one field, `request`, and the answer one field, `response`; the route
+ * (`web-search` or `web-fetch`) is bound in where a model name would be, so one cannot be replayed as the other.
+ */
+export async function encryptWebRequest(request: unknown, opts: { publicKey: string; model: 'web-search' | 'web-fetch'; now?: number }): Promise<WebSession> {
+  const suite = SUITES[0];
+  const service = suite.parse(opts.publicKey);
+  const client = suite.keypair();
+  const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
+  const ts = Math.floor((opts.now ?? Date.now()) / 1000);
+  const ciphertext = await seal(suite, service, JSON.stringify(request), requestAad(suite.algo, 'request', opts.model, nonce, ts));
+  return {
+    body: { request: ciphertext },
+    headers: { 'X-E2EE-Version': '2', 'X-Client-Pub-Key': hex(client.public), 'X-Model-Pub-Key': hex(service), 'X-E2EE-Nonce': nonce, 'X-E2EE-Timestamp': String(ts) },
+    async open(answer) {
+      if (typeof answer?.response !== 'string' || typeof answer?.id !== 'string') throw new E2eeError('the answer is not encrypted: it was not made by the enclave for this request');
+      let plain: string;
+      try {
+        plain = await open(suite, client.secret, answer.response, responseAad(suite.algo, 'response', answer.id, opts.model, nonce, ts));
+      } catch {
+        throw new E2eeError('the answer did not decrypt with this request\'s key: it was not made by the enclave for this request');
+      }
+      return JSON.parse(plain);
+    },
+  };
+}
+
 /** The enclave's side, for tests and for anything that plays the enclave: open a request field, seal an answer field. */
 export const enclave = {
   openRequestField(algo: string, secret: Uint8Array, ciphertext: string, field: string, model: string, nonce: string, ts: number) {
